@@ -13,6 +13,24 @@ from PySide6.QtWidgets import (
     QMessageBox
 )
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        # sys._MEIPASS is deprecated, use sys.executable and handle frozen state
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            base_path = sys._MEIPASS
+        else:
+            # Not bundled, running in development mode
+            # Use the directory of the main script file
+            base_path = os.path.abspath(os.path.dirname(__file__))
+    except Exception:
+        # Fallback to current working directory if other methods fail
+         base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
 # --- Configuration Constants ---
 # Using uppercase for constants is standard Python practice
 LOCATIONS = {
@@ -21,7 +39,7 @@ LOCATIONS = {
     'Buckeye': '7'
 }
 FILENAME = 'trips.csv'
-ICON_PATH = "mariani_icon.png"
+ICON_PATH = resource_path("mariani_icon.png")
 # Use a constant for notification duration (3000ms = 3 seconds)
 # 100ms was too short and likely ignored by the OS anyway
 NOTIFICATION_DURATION_MS = 3000

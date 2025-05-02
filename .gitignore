@@ -1,1 +1,5 @@
 /trips.csv
+/build
+/dist
+/Triplogger.spec
+/.gitignore
