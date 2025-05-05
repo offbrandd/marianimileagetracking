@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, Tuple, List # Added List
 
 # --- PySide6 Imports ---
-from PySide6.QtCore import QSize, QObject, Qt, QSettings, QStandardPaths # Added QSettings, QStandardPaths
+from PySide6.QtCore import QSize, QObject, Qt, QSettings, QStandardPaths, QSharedMemory
 from PySide6.QtGui import QIcon, QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton,
@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (
 # --- Configuration Constants ---
 ORGANIZATION_NAME = "Mariani Nut Co - Brandon Tytler" # Replace with yours
 APPLICATION_NAME = "TripLogger"
+# ** Add a unique key for Shared Memory **
+SHARED_MEM_KEY = f"{ORGANIZATION_NAME}_{APPLICATION_NAME}_InstanceLock"
+
 LOCATIONS = {
     '505': '5',
     'Baker/Edwards/HR': '1',
@@ -369,11 +372,47 @@ class TrayManager(QObject):
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
+    # Keep a reference to shared memory alive for the primary instance
+    shared_memory = QSharedMemory(SHARED_MEM_KEY)
+
+    # Try to attach to existing segment (means another instance is running)
+    if shared_memory.attach(QSharedMemory.AccessMode.ReadOnly):
+        print("Another instance is already running. Exiting.")
+        # Optional: Use QLocalSocket here to signal existing instance to show window
+        sys.exit(0) # Exit second instance successfully
+
+    # Try to create the segment (means this is the first instance)
+    if not shared_memory.create(1): # Size 1 byte is enough
+        # If create fails after attach failed, check error (maybe stale segment)
+        error_message = f"Could not create shared memory segment: {shared_memory.errorString()}"
+        print(f"ERROR: {error_message}")
+        # Show message box even without full QApplication potentially
+        # Create temporary app just for message box if needed
+        _temp_app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(None, "Application Startup Error", error_message)
+        # Ensure detach is attempted even on error exit
+        if shared_memory.isAttached():
+             shared_memory.detach()
+        sys.exit(1) # Exit with an error code
+    else:
+        print("Shared memory created. Starting application (first instance).")
+
+    # --- If we reach here, this is the first instance ---
+
+    # Ensure cleanup happens when the application quits cleanly
+    def cleanup_shared_memory():
+        # Check if attached before detaching
+        if shared_memory.isAttached():
+            shared_memory.detach()
+        print("Shared memory detached.")
+
     # Set Org/App names *before* creating QApplication or QSettings instances
     QApplication.setOrganizationName(ORGANIZATION_NAME)
     QApplication.setApplicationName(APPLICATION_NAME)
 
     app = QApplication(sys.argv)
+    # ** Connect the cleanup function to the application's quit signal **
+    app.aboutToQuit.connect(cleanup_shared_memory)
     app.setQuitOnLastWindowClosed(False)
 
     # --- Load Icon ---
