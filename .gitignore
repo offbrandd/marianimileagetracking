@@ -1,5 +1,8 @@
 /trips.csv
 /build
 /dist
-/Triplogger.spec
-/.gitignore
+*.spec
+*.gitignore
+*.exe
+*.iss
+*.bat
