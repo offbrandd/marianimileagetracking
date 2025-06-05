@@ -2,7 +2,7 @@ import csv
 import sys
 import os
 from datetime import datetime
-from typing import Optional, Tuple, List # Added List
+from typing import Optional, Tuple, List
 
 # --- PySide6 Imports ---
 from PySide6.QtCore import QSize, QObject, Qt, QSettings, QStandardPaths, QSharedMemory
@@ -10,62 +10,58 @@ from PySide6.QtGui import QIcon, QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton,
     QButtonGroup, QVBoxLayout, QInputDialog, QSystemTrayIcon, QMenu,
-    QMessageBox, QFileDialog # Added QFileDialog
+    QMessageBox, QFileDialog
 )
 
 # --- Configuration Constants ---
 ORGANIZATION_NAME = "Mariani Nut Co - Brandon Tytler" # Replace with yours
 APPLICATION_NAME = "TripLogger"
-# ** Add a unique key for Shared Memory **
 SHARED_MEM_KEY = f"{ORGANIZATION_NAME}_{APPLICATION_NAME}_InstanceLock"
 
+# Updated LOCATIONS: Baker, Edwards, HR are now separate
 LOCATIONS = {
     '505': '5',
-    'Baker/Edwards/HR': '1',
+    'Baker': '1',  # Assuming '1' was the shared mileage, adjust if needed
+    'Edwards': '1', # Assuming '1' was the shared mileage, adjust if needed
+    'HR': '1',      # Assuming '1' was the shared mileage, adjust if needed
     'Buckeye': '7'
 }
-# FILENAME is now dynamic, defined later using QSettings
-ICON_FILENAME = "mariani_icon.png" # Base name for the icon file
+ICON_FILENAME = "mariani_icon.png"
 NOTIFICATION_DURATION_MS = 1000
 
 # --- Helper function for resource path ---
 def resource_path(relative_path: str) -> str:
     """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
-        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-            # PyInstaller temp folder
-            base_path = sys._MEIPASS
-        else:
-            # Development mode
-            base_path = os.path.abspath(os.path.dirname(__file__))
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
     except Exception:
-         base_path = os.path.abspath(".")
+        base_path = os.path.abspath(os.path.dirname(__file__))
     return os.path.join(base_path, relative_path)
 
-# Define Icon Path using the helper
-ICON_PATH = resource_path(ICON_FILENAME)
+ICON_PATH = resource_path(ICON_FILENAME) if os.path.exists(resource_path(ICON_FILENAME)) else QIcon.fromTheme("application-x-executable").name()
+
 
 # --- Settings Functions ---
 def save_data_file_path(path: Optional[str]) -> None:
     """Saves the chosen data file path to settings. Saves empty string if path is None."""
     settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
-    settings.setValue("dataFilePath", path if path else "") # Store empty string for None
+    settings.setValue("dataFilePath", path if path else "")
 
 def load_data_file_path() -> Optional[str]:
     """Loads the data file path from settings. Returns None if not set or empty."""
     settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
     path = settings.value("dataFilePath")
-    # Return None if path is None or an empty string
     return path if path else None
 
 # --- CSV File Handling ---
 def initialize_csv(filename: str) -> bool:
-    """Creates the CSV file with headers if it doesn't exist at the given path."""
-    if not filename: # Cannot initialize if filename is empty/None
+    """Creates the CSV file with headers (including Trip Reason) if it doesn't exist."""
+    if not filename:
         return False
     directory = os.path.dirname(filename)
     try:
-        if directory: # Only create if directory part exists (might be just filename)
+        if directory:
              os.makedirs(directory, exist_ok=True)
     except OSError as e:
          QMessageBox.critical(None, "Directory Error", f"Could not create directory:\n{directory}\nError: {e}")
@@ -75,44 +71,80 @@ def initialize_csv(filename: str) -> bool:
         try:
             with open(filename, 'w', newline='') as file:
                 writer = csv.writer(file)
-                writer.writerow(["Date", "Location", "Number"])
+                # Added "Trip Reason" to header
+                writer.writerow(["Date", "Location", "Miles", "Trip Reason"])
             return True
         except IOError as e:
             QMessageBox.critical(None, "File Creation Error", f"Could not create required file:\n{filename}\nError: {e}")
             return False
-    # Check if we can write to existing file (simple permission check)
+    else: # File exists, check if header needs update (simple check for "Trip Reason")
+        try:
+            with open(filename, 'r+', newline='') as file:
+                reader = csv.reader(file)
+                try:
+                    header = next(reader)
+                    if len(header) < 4 or header[3].lower() != "trip reason":
+                        # Need to rewrite the file with the new header if it's missing or incorrect
+                        # This is a simple approach; for large files, a backup and rewrite is safer
+                        file.seek(0)
+                        rows = list(reader) # Read existing data
+                        file.truncate(0) # Clear the file
+                        writer = csv.writer(file)
+                        writer.writerow(["Date", "Location", "Miles", "Trip Reason"])
+                        for row in rows:
+                            if len(row) == 3: # Old format, add empty reason
+                                writer.writerow(row + [""])
+                            elif len(row) >= 4: # Potentially already has it or more
+                                writer.writerow(row[:4]) # Take first 4
+                            else: # Corrupted row, skip or handle
+                                writer.writerow(row + [""] * (4 - len(row)))
+
+
+                except StopIteration: # File is empty
+                    writer = csv.writer(file)
+                    writer.writerow(["Date", "Location", "Miles", "Trip Reason"])
+            return True
+
+        except IOError as e:
+            QMessageBox.critical(None, "File Access Error", f"Cannot access or update file headers:\n{filename}\nError: {e}")
+            return False
+    return True
+
+
+# --- Core Data Functions ---
+def add_trip_record(location: str, trip_reason: str, file_path: str) -> None:
+    """Appends a trip record (including trip reason) to the specified CSV file."""
+    entry = [datetime.now().strftime("%Y-%m-%d"), location, LOCATIONS[location], trip_reason]
     try:
-        with open(filename, 'a', newline=''):
-            pass
-        return True
+        with open(file_path, 'a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(entry)
     except IOError as e:
-        QMessageBox.critical(None, "File Access Error", f"Cannot write to selected file (check permissions):\n{filename}\nError: {e}")
-        return False
+        # Error will be handled by the caller (add_predefined_trip)
+        raise e
+    except KeyError as e:
+        # Error will be handled by the caller
+        raise e
 
-
-# --- Core Data Functions (now require file_path argument) ---
-def add_trip_record(location: str, file_path: str) -> None:
-    """Appends a trip record to the specified CSV file."""
-    entry = [datetime.now().strftime("%Y-%m-%d"), location, LOCATIONS[location]]
-    with open(file_path, 'a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(entry)
 
 def get_custom_trip_input(parent_window: QWidget, file_path: str) -> Tuple[bool, Optional[str]]:
-    """Gets custom trip details and adds the record to the specified CSV file."""
+    """Gets custom trip details (including trip reason) and adds the record."""
     location_name, ok1 = QInputDialog.getText(parent_window, "Custom Trip Input", "Enter Location Name:")
     if ok1 and location_name:
-        number_str, ok2 = QInputDialog.getText(parent_window, "Custom Trip Input", f"Enter Number for '{location_name}':")
+        number_str, ok2 = QInputDialog.getText(parent_window, "Custom Trip Input", f"Enter Miles for '{location_name}':")
         if ok2 and number_str:
-            entry = [datetime.now().strftime("%Y-%m-%d"), location_name, number_str]
-            try:
-                with open(file_path, 'a', newline='') as file:
-                    writer = csv.writer(file)
-                    writer.writerow(entry)
-                return True, f"{location_name} ({number_str} mi)"
-            except IOError as e:
-                QMessageBox.warning(parent_window, "File Error", f"Could not write trip to {os.path.basename(file_path)}:\n{e}")
-                return False, None
+            trip_reason, ok3 = QInputDialog.getText(parent_window, "Custom Trip Input", "Enter Trip Reason:")
+            if ok3: # Allow empty trip reason if dialog is confirmed
+                entry = [datetime.now().strftime("%Y-%m-%d"), location_name, number_str, trip_reason]
+                try:
+                    with open(file_path, 'a', newline='') as file:
+                        writer = csv.writer(file)
+                        writer.writerow(entry)
+                    return True, f"{location_name} ({number_str} mi) - Reason: {trip_reason if trip_reason else 'N/A'}"
+                except IOError as e:
+                    QMessageBox.warning(parent_window, "File Error", f"Could not write trip to {os.path.basename(file_path)}:\n{e}")
+                    return False, None
+            # else: User cancelled trip reason input
         elif ok2:
              QMessageBox.information(parent_window, "Input Required", "Custom trip number cannot be empty.")
     elif ok1:
@@ -122,28 +154,30 @@ def get_custom_trip_input(parent_window: QWidget, file_path: str) -> Tuple[bool,
 
 # --- Main Window Class ---
 class MainWindow(QMainWindow):
-    """Main application window for selecting trip types."""
     def __init__(self) -> None:
         super().__init__()
-        self.tray_manager: Optional[TrayManager] = None
-        self.data_file_path: Optional[str] = None # Holds the current path
+        self.tray_manager: Optional['TrayManager'] = None
+        self.data_file_path: Optional[str] = None
 
         self.setWindowTitle("Trip Logger")
-        self.resize(QSize(300, 250))
+        self.resize(QSize(300, 350)) # Increased height slightly for more buttons
 
-        # --- UI Elements ---
         self.button_group = QButtonGroup(self)
         layout = QVBoxLayout()
-        self.trip_buttons: List[QPushButton] = [] # Keep track of buttons
+        self.trip_buttons: List[QPushButton] = []
 
+        # Updated button configuration
         location_buttons_config = {
              '505': '505',
-             'Baker/Edwards/HR': 'Baker/Edwards/HR',
+             'Baker': 'Baker',
+             'Edwards': 'Edwards',
+             'HR': 'HR',
              'Buckeye': 'Buckeye'
         }
         for data_location, button_label in location_buttons_config.items():
             button = QPushButton(button_label)
             self.button_group.addButton(button)
+            # Use a lambda to capture the correct location for each button
             button.clicked.connect(lambda checked=False, loc=data_location: self.add_predefined_trip(loc))
             layout.addWidget(button)
             self.trip_buttons.append(button)
@@ -152,27 +186,20 @@ class MainWindow(QMainWindow):
         self.button_group.addButton(custom_button)
         custom_button.clicked.connect(self.add_custom_trip)
         layout.addWidget(custom_button)
-        self.trip_buttons.append(custom_button)
+        self.trip_buttons.append(custom_button) # Also disable/enable custom button
 
         main_container = QWidget()
         main_container.setLayout(layout)
         self.setCentralWidget(main_container)
 
-        # --- Setup Menu ---
         self._create_menus()
-
-        # --- Load Settings and Check Path ---
         self.load_settings_and_update_state()
-    
-    # --- Add this method back inside the MainWindow class ---
+
     def set_tray_manager(self, manager: 'TrayManager') -> None:
-        """Stores a reference to the TrayManager instance for notifications."""
-        # Type hint uses forward reference string 'TrayManager' as the class might be defined later
         self.tray_manager = manager
 
     def _create_menus(self) -> None:
-        """Creates the main menu bar and actions."""
-        self.set_file_action = QAction("&Set Data File...", self) # Added mnemonic
+        self.set_file_action = QAction("&Set Data File...", self)
         self.set_file_action.setStatusTip("Choose the CSV file where trip data will be saved")
         self.set_file_action.triggered.connect(self.prompt_and_set_data_file)
 
@@ -185,252 +212,221 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
     def load_settings_and_update_state(self) -> None:
-        """Loads the data file path from settings and updates UI state."""
         loaded_path = load_data_file_path()
         is_path_valid = False
         if loaded_path:
-            # Check if directory exists and file can be initialized (created/opened)
-            if os.path.exists(os.path.dirname(loaded_path)) and initialize_csv(loaded_path):
-                 self.data_file_path = loaded_path
-                 is_path_valid = True
+            # Ensure the directory of the loaded path exists before calling initialize_csv
+            dir_name = os.path.dirname(loaded_path)
+            if not dir_name or os.path.exists(dir_name): # If dir_name is empty (just filename), it's fine
+                if initialize_csv(loaded_path): # initialize_csv now also checks header
+                    self.data_file_path = loaded_path
+                    is_path_valid = True
+                else:
+                    # Path exists but init failed (permissions, header update issue)
+                    self.data_file_path = None
+                    save_data_file_path(None) # Clear invalid setting
+                    # Error message was shown by initialize_csv
             else:
-                 # Path exists in settings but isn't valid anymore (e.g., dir deleted, no permissions)
-                 self.data_file_path = None
-                 # Clear the invalid setting
-                 save_data_file_path(None)
-                 QMessageBox.warning(self, "Invalid Path", f"The previously saved data path is invalid or inaccessible:\n{loaded_path}\nPlease set a new data file location.")
+                # Directory for the saved path doesn't exist anymore
+                self.data_file_path = None
+                save_data_file_path(None)
+                QMessageBox.warning(self, "Invalid Path", f"The directory for the saved data path no longer exists:\n{loaded_path}\nPlease set a new data file location.")
         else:
              self.data_file_path = None
 
         self.update_button_states(enable=is_path_valid)
-
-        # Prompt user immediately on first run if no valid path is set
-        if not is_path_valid:
+        if not is_path_valid and not self.data_file_path: # Only prompt if truly no path
              self.prompt_for_initial_data_file()
 
 
     def prompt_for_initial_data_file(self):
-         """Shows a message and triggers the file dialog on first run / invalid path."""
          reply = QMessageBox.information(
-              self,
-              "Setup Required",
-              "Welcome to Trip Logger!\n\nPlease select a location to save your trip data (trips.csv).",
+              self, "Setup Required",
+              "Welcome to Trip Logger!\n\nPlease select a location to save your trip data (e.g., trips.csv).",
               QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
               )
          if reply == QMessageBox.StandardButton.Ok:
               self.prompt_and_set_data_file()
-         # else: User cancelled initial setup, buttons remain disabled
-
 
     def prompt_and_set_data_file(self) -> bool:
-        """Shows dialog to select/create CSV, saves path, and updates state."""
         documents_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
         current_dir = os.path.dirname(self.data_file_path) if self.data_file_path else documents_path
         default_name = os.path.basename(self.data_file_path) if self.data_file_path else "trips.csv"
         suggested_path = os.path.join(current_dir, default_name)
 
-
         file_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Select or Create Data File",
-            suggested_path,
-            "CSV Files (*.csv);;All Files (*)"
+            self, "Select or Create Data File", suggested_path, "CSV Files (*.csv);;All Files (*)"
         )
 
         if file_path:
             if not file_path.lower().endswith(".csv"):
                 file_path += ".csv"
-
-            if initialize_csv(file_path): # Checks writability and creates header
+            if initialize_csv(file_path):
                 self.data_file_path = file_path
                 save_data_file_path(self.data_file_path)
                 self.update_button_states(enable=True)
-                self.statusBar().showMessage(f"Data file set to: {self.data_file_path}", 5000) # Show in status bar
+                self.statusBar().showMessage(f"Data file set to: {self.data_file_path}", 5000)
                 return True
             else:
-                # initialize_csv showed error message
-                self.data_file_path = None
+                self.data_file_path = None # Reset on failure
                 save_data_file_path(None)
                 self.update_button_states(enable=False)
+                # Error message already shown by initialize_csv
                 return False
-        else: # User cancelled
-             # self.statusBar().showMessage("Data file selection cancelled.", 3000)
-             return False
+        return False
 
     def update_button_states(self, enable: bool) -> None:
-        """Enables or disables the trip adding buttons."""
-        for button in self.trip_buttons:
+        for button in self.trip_buttons: # self.trip_buttons includes all predefined and custom
              button.setEnabled(enable)
         if not enable:
-             self.statusBar().showMessage("No valid data file set. Use File -> Set Data File...", 0) # Persistent message
+             self.statusBar().showMessage("No valid data file set. Use File -> Set Data File...", 0)
+        else:
+            if self.data_file_path: # Clear status bar if path is set and buttons enabled
+                self.statusBar().clearMessage()
+
 
     def _is_path_valid(self) -> bool:
-         """Checks if data path is set and file is accessible."""
          if not self.data_file_path:
-              QMessageBox.warning(self, "Setup Required", "Please set the data file location first using the File menu.")
-              # Trigger the prompt maybe?
-              # return self.prompt_and_set_data_file()
+              QMessageBox.warning(self, "Setup Required", "Please set the data file location first (File menu).")
               return False
-         # Re-check writability just in case
+         # Re-check writability and header (initialize_csv does this)
          if not initialize_csv(self.data_file_path):
-             # Error message shown by initialize_csv
-             self.update_button_states(False) # Disable buttons if path becomes invalid
+             self.update_button_states(False)
              return False
          return True
 
-
     def add_predefined_trip(self, location: str) -> None:
-        """Handles adding a predefined trip after checking path."""
+        """Handles adding a predefined trip, including prompting for trip reason."""
         if not self._is_path_valid():
             return
 
-        try:
-            # Pass the currently configured path
-            add_trip_record(location, self.data_file_path)
-            if self.tray_manager:
-                mileage = LOCATIONS[location]
-                self.tray_manager.show_notification(f"Added trip to {location} ({mileage} mi)")
-        except IOError as e:
-            QMessageBox.warning(self, "File Error", f"Could not write trip:\n{e}")
-            self.update_button_states(False) # Disable buttons if path is unwritable
-        except KeyError:
-             QMessageBox.critical(self, "Configuration Error", f"Internal error: Location '{location}' not configured.")
-        except Exception as e:
-            QMessageBox.critical(self, "Unexpected Error", f"An unexpected error occurred:\n{e}")
+        # Prompt for Trip Reason
+        trip_reason, ok = QInputDialog.getText(self, "Trip Reason", f"Enter reason for trip to {location}:")
+
+        if ok: # User clicked OK, reason can be empty
+            try:
+                add_trip_record(location, trip_reason, self.data_file_path)
+                if self.tray_manager:
+                    mileage = LOCATIONS[location]
+                    reason_display = f" - Reason: {trip_reason}" if trip_reason else ""
+                    self.tray_manager.show_notification(f"Added: {location} ({mileage} mi){reason_display}")
+            except IOError as e:
+                QMessageBox.warning(self, "File Error", f"Could not write trip:\n{e}")
+                self.update_button_states(False) # Disable buttons if path is unwritable
+            except KeyError:
+                 QMessageBox.critical(self, "Configuration Error", f"Internal error: Location '{location}' not found in LOCATIONS.")
+            except Exception as e:
+                QMessageBox.critical(self, "Unexpected Error", f"An unexpected error occurred:\n{e}")
+        # else: User cancelled the trip reason input, so do nothing.
 
     def add_custom_trip(self) -> None:
-        """Handles adding a custom trip after checking path."""
         if not self._is_path_valid():
             return
-
-        # Pass the currently configured path
         success, details = get_custom_trip_input(self, self.data_file_path)
-
-        if success and self.tray_manager:
+        if success and self.tray_manager and details: # details can be None
              self.tray_manager.show_notification(f"Added custom trip: {details}")
 
+
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Overrides the window close event (clicking 'X') to hide the window."""
         event.ignore()
         self.hide()
         if self.tray_manager:
-             self.tray_manager.tray.showMessage( "Still Running",
+             self.tray_manager.tray.showMessage("Still Running",
                  "Trip Logger is running in the system tray.",
-                 QSystemTrayIcon.MessageIcon.Information, 1500 )
+                 QSystemTrayIcon.MessageIcon.Information, 1500)
 
-    # Need this method for TrayManager to access the action
     def get_set_file_action(self) -> QAction:
          return self.set_file_action
 
-
 # --- System Tray Class ---
 class TrayManager(QObject):
-    """Manages the system tray icon, menu, and notifications."""
     def __init__(self, application: QApplication, main_window: MainWindow, app_icon: QIcon, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self.app = application
         self.main_window = main_window
         self.icon = app_icon
 
-        self.tray = QSystemTrayIcon(self.icon, parent=self)
-        self.tray.setToolTip(APPLICATION_NAME) # Use constant
+        self.tray = QSystemTrayIcon(self.icon, parent=self) # Pass self as parent
+        self.tray.setToolTip(APPLICATION_NAME)
 
-        # --- Create Menu ---
         self.menu = QMenu()
-
         show_action = QAction("Show Logger Window", self)
         show_action.triggered.connect(self.main_window.show)
-        show_action.triggered.connect(self.main_window.activateWindow)
+        show_action.triggered.connect(self.main_window.activateWindow) # Ensure it gets focus
         self.menu.addAction(show_action)
 
-        # Add "Set Data File" Action using the one from MainWindow
         self.menu.addAction(self.main_window.get_set_file_action())
-
         self.menu.addSeparator()
-
         quit_action = QAction("Quit Trip Logger", self)
         quit_action.triggered.connect(self.app.quit)
         self.menu.addAction(quit_action)
 
-        # --- Final Tray Setup ---
         self.tray.setContextMenu(self.menu)
-        self.tray.setVisible(True)
+        self.tray.setVisible(True) # Make sure it's visible
         self.tray.activated.connect(self.on_tray_icon_activated)
 
     def on_tray_icon_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        """Shows the main window when the tray icon is clicked."""
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger: # Typically left click
             self.main_window.show()
-            self.main_window.activateWindow()
+            self.main_window.activateWindow() # Bring to front and give focus
 
     def show_notification(self, message: str) -> None:
-        """Displays a standard notification message from the system tray icon."""
         self.tray.showMessage(
-            "Trip Added Successfully", message,
-            QSystemTrayIcon.MessageIcon.Information, NOTIFICATION_DURATION_MS )
-
+            "Trip Added", message, # Changed title slightly
+            QSystemTrayIcon.MessageIcon.Information, NOTIFICATION_DURATION_MS
+        )
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    # Keep a reference to shared memory alive for the primary instance
     shared_memory = QSharedMemory(SHARED_MEM_KEY)
-
-    # Try to attach to existing segment (means another instance is running)
     if shared_memory.attach(QSharedMemory.AccessMode.ReadOnly):
+        # QMessageBox.information(None, "Application Running", "Another instance of TripLogger is already running.")
+        # Instead of a message box, just exit silently for a cleaner user experience.
+        # If you need to signal the existing instance to show its window,
+        # that would require more complex inter-process communication (e.g., QLocalServer/Socket).
         print("Another instance is already running. Exiting.")
-        # Optional: Use QLocalSocket here to signal existing instance to show window
-        sys.exit(0) # Exit second instance successfully
+        sys.exit(0)
 
-    # Try to create the segment (means this is the first instance)
-    if not shared_memory.create(1): # Size 1 byte is enough
-        # If create fails after attach failed, check error (maybe stale segment)
+    if not shared_memory.create(1):
         error_message = f"Could not create shared memory segment: {shared_memory.errorString()}"
-        print(f"ERROR: {error_message}")
-        # Show message box even without full QApplication potentially
-        # Create temporary app just for message box if needed
-        _temp_app = QApplication.instance() or QApplication(sys.argv)
+        # Attempt to create a temp app for the message box if QApplication doesn't exist yet
+        _temp_app_instance = QApplication.instance()
+        if not _temp_app_instance:
+            _temp_app_instance = QApplication(sys.argv) # Create a temporary one
+        
         QMessageBox.critical(None, "Application Startup Error", error_message)
-        # Ensure detach is attempted even on error exit
-        if shared_memory.isAttached():
-             shared_memory.detach()
-        sys.exit(1) # Exit with an error code
-    else:
-        print("Shared memory created. Starting application (first instance).")
-
-    # --- If we reach here, this is the first instance ---
-
-    # Ensure cleanup happens when the application quits cleanly
+        if shared_memory.isAttached(): # Should not be necessary if create failed, but good practice
+            shared_memory.detach()
+        sys.exit(1)
+    
+    # Make sure to detach shared memory when the application quits
+    # This is crucial for allowing the next run to acquire the lock
     def cleanup_shared_memory():
-        # Check if attached before detaching
         if shared_memory.isAttached():
             shared_memory.detach()
         print("Shared memory detached.")
 
-    # Set Org/App names *before* creating QApplication or QSettings instances
     QApplication.setOrganizationName(ORGANIZATION_NAME)
     QApplication.setApplicationName(APPLICATION_NAME)
 
     app = QApplication(sys.argv)
-    # ** Connect the cleanup function to the application's quit signal **
-    app.aboutToQuit.connect(cleanup_shared_memory)
-    app.setQuitOnLastWindowClosed(False)
+    app.aboutToQuit.connect(cleanup_shared_memory) # Connect cleanup
+    app.setQuitOnLastWindowClosed(False) # Important for tray icon behavior
 
     # --- Load Icon ---
-    if os.path.exists(ICON_PATH):
+    # Use a proper check for the icon path
+    if os.path.exists(ICON_PATH) and ICON_PATH != QIcon.fromTheme("application-x-executable").name():
         app_icon = QIcon(ICON_PATH)
     else:
-        print(f"Warning: Icon file not found at resolved path {ICON_PATH}.")
-        app_icon = QIcon.fromTheme("application-x-executable")
-    app.setWindowIcon(app_icon)
+        print(f"Warning: Icon file '{ICON_FILENAME}' not found at '{ICON_PATH}'. Using default system icon.")
+        app_icon = QIcon.fromTheme("application-x-executable", QIcon()) # Provide a fallback QIcon()
+    app.setWindowIcon(app_icon) # Set for the whole application
 
-    # --- Create UI Components ---
-    # MainWindow now handles loading settings and initial path check
+
     window = MainWindow()
-    tray_manager = TrayManager(app, window, app_icon)
-    window.set_tray_manager(tray_manager) # Still needed for notifications
+    # Pass the app_icon also to TrayManager if it uses it
+    tray_manager = TrayManager(app, window, app_icon) # Pass actual app_icon
+    window.set_tray_manager(tray_manager)
 
-    # --- Show Window ---
     window.show()
-
-    # --- Start Event Loop ---
     sys.exit(app.exec())
